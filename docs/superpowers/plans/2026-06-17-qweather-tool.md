@@ -49,18 +49,21 @@ tests/
 `tests/test_config.py`:
 ```python
 """config 模块测试。"""
-import importlib
-import os
 
 
 def _reload_config(monkeypatch, env):
-    """用指定 env 重载 config 模块。"""
+
+
+def _reload_config(monkeypatch, env):
+    """用指定 env 重新加载 config(不读真实 .env)。"""
+    import qweather.config as config
     for k in ["DEEPSEEK_API_KEY", "QWEATHER_HOST", "QWEATHER_KEY"]:
         monkeypatch.delenv(k, raising=False)
+    # 屏蔽真实 .env,只用 monkeypatch 注入的测试值
+    monkeypatch.setattr(config, "load_dotenv", lambda *a, **k: None)
     for k, v in env.items():
         monkeypatch.setenv(k, v)
-    import qweather.config as config
-    importlib.reload(config)
+    config.load()
     return config
 
 
@@ -121,19 +124,36 @@ import os
 import sys
 from dotenv import load_dotenv
 
-load_dotenv()
-
 # 和风天气配置
-QWEATHER_HOST = os.getenv("QWEATHER_HOST", "")
-QWEATHER_KEY = os.getenv("QWEATHER_KEY", "")
+QWEATHER_HOST = ""
+QWEATHER_KEY = ""
 
 # DeepSeek 配置
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+DEEPSEEK_API_KEY = ""
+
+# .env.example 中的占位符集合(用于检测未配置)
+_PLACEHOLDERS = {
+    "your_deepseek_api_key_here",
+    "your_qweather_host_here",
+    "your_qweather_jwt_token_here",
+    "your_project_id_here",
+    "your_credential_id_here",
+    "path/to/your_ed25519.pem",
+}
+
+
+def load() -> None:
+    """从 .env 与环境变量加载配置(模块加载时调用一次,测试可重复调用注入)。"""
+    global QWEATHER_HOST, QWEATHER_KEY, DEEPSEEK_API_KEY
+    load_dotenv()
+    QWEATHER_HOST = os.getenv("QWEATHER_HOST", "")
+    QWEATHER_KEY = os.getenv("QWEATHER_KEY", "")
+    DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 
 
 def _is_placeholder(value: str) -> bool:
     """判断值是否仍是 .env.example 里的占位符。"""
-    return value.startswith("your_") or value.endswith("_here")
+    return value in _PLACEHOLDERS or value.startswith("your_") or value.endswith("_here")
 
 
 def check_config() -> None:
@@ -154,6 +174,10 @@ def check_config() -> None:
         print(f"[错误] 缺少配置:{', '.join(missing)}")
         print("请在 .env 中配置(参考 .env.example)")
         sys.exit(1)
+
+
+# 模块加载时执行一次
+load()
 ```
 
 - [ ] **Step 4: 运行测试验证通过**
@@ -186,14 +210,17 @@ from pathlib import Path
 from qweather.cache import _safe_filename, CityCache
 
 
-def test_safe_filename_short():
-    assert _safe_filename("朝阳|北京|cn") == "朝阳|北京|cn"
+def test_safe_filename_short_replaces_pipe():
+    # | 是 Windows 非法字符,必须被替换
+    name = _safe_filename("朝阳|北京|cn")
+    assert "|" not in name
+    assert "朝阳" in name and "北京" in name and "cn" in name
 
 
-def test_safe_filename_strips_slashes():
-    assert "/" not in _safe_filename("a/b\\c d")
-    assert "\\" not in _safe_filename("a/b\\c d")
-    assert " " not in _safe_filename("a/b\\c d")
+def test_safe_filename_strips_illegal_chars():
+    name = _safe_filename('a/b\\c d|e:f*g?h"i<j>k')
+    for ch in '/\\:*?"<>| ':
+        assert ch not in name
 
 
 def test_safe_filename_long_hashes():
@@ -257,15 +284,20 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+# 项目根:以本模块文件锚定(qweather/cache.py 的上两级),不依赖 cwd
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # 缓存根目录(项目根下 .cache/qweather)
-_CACHE_ROOT = Path(".cache/qweather")
+_CACHE_ROOT = _PROJECT_ROOT / ".cache" / "qweather"
 _CITIES_DIR = _CACHE_ROOT / "cities"
 _WEATHER_DIR = _CACHE_ROOT / "weather"
+
+# 文件名非法字符(Windows: / \ : * ? " < > |,以及空格)
+_ILLEGAL_CHARS = '/\\:*?"<>| '
 
 
 def _safe_filename(key: str) -> str:
     """
-    将缓存 key 转为安全文件名:去除非法字符,过长用 md5 哈希。
+    将缓存 key 转为安全文件名:替换所有文件系统非法字符,过长用 md5 哈希。
 
     Args:
         key: 原始 key(如 "朝阳|北京|cn")
@@ -273,7 +305,9 @@ def _safe_filename(key: str) -> str:
     Returns:
         安全文件名(不含扩展名)
     """
-    cleaned = key.replace("/", "_").replace("\\", "_").replace(" ", "")
+    cleaned = key
+    for ch in _ILLEGAL_CHARS:
+        cleaned = cleaned.replace(ch, "_")
     if len(cleaned) <= 64:
         return cleaned
     return hashlib.md5(key.encode("utf-8")).hexdigest()
@@ -476,72 +510,65 @@ git commit -m "feat(qweather): WeatherCache 按日期存储与当天有效判断
 
 `tests/test_api.py`:
 ```python
-"""api 模块测试(mock httpx)。"""
+"""api 模块测试(mock httpx,缓存通过参数注入避免单例污染)。"""
 from unittest.mock import patch, MagicMock
 
 import qweather.api as api
+from qweather.cache import CityCache, WeatherCache
 
 
 def _mock_response(json_data, status=200):
     resp = MagicMock()
     resp.json.return_value = json_data
     resp.status_code = status
+    resp.raise_for_status = MagicMock()  # 默认不抛
     return resp
 
 
-def test_lookup_city_uses_cache(tmp_path, monkeypatch):
-    # 指向临时缓存目录,先写入再读
-    from qweather import cache as cachemod
-    monkeypatch.setattr(cachemod, "_CITIES_DIR", tmp_path / "cities")
-    monkeypatch.setattr(api, "_city_cache", cachemod.CityCache(tmp_path / "cities"))
-    api._city_cache.save("北京", "", {"location": [{"name": "北京", "id": "101010100"}]})
+def test_lookup_city_uses_cache(tmp_path):
+    cache = CityCache(tmp_path / "cities")
+    cache.save("北京", "", {"location": [{"name": "北京", "id": "101010100"}]})
 
-    result = api.lookup_city("北京")
+    result = api.lookup_city("北京", cache=cache)
     assert result["location"] == [{"name": "北京", "id": "101010100"}]
     assert result["from_cache"] is True
 
 
-def test_lookup_city_requests_and_caches(tmp_path, monkeypatch):
-    from qweather import cache as cachemod
-    monkeypatch.setattr(api, "_city_cache", cachemod.CityCache(tmp_path / "cities"))
-
+def test_lookup_city_requests_and_caches(tmp_path):
+    cache = CityCache(tmp_path / "cities")
     api_data = {"code": "200", "location": [{"name": "上海", "id": "101020100"}]}
     with patch("qweather.api.httpx.get", return_value=_mock_response(api_data)) as mock_get:
-        result = api.lookup_city("上海")
+        result = api.lookup_city("上海", cache=cache)
 
     assert result["location"] == [{"name": "上海", "id": "101020100"}]
     assert result["from_cache"] is False
-    # 参数含 range=cn
     call = mock_get.call_args
     assert call.kwargs["params"]["range"] == "cn"
     assert call.kwargs["params"]["location"] == "上海"
-    # 已写入缓存
-    assert api._city_cache.get("上海") == [{"name": "上海", "id": "101020100"}]
+    # 已写入注入的缓存
+    assert cache.get("上海") == [{"name": "上海", "id": "101020100"}]
 
 
-def test_lookup_city_adm_passed(tmp_path, monkeypatch):
-    from qweather import cache as cachemod
-    monkeypatch.setattr(api, "_city_cache", cachemod.CityCache(tmp_path / "cities"))
+def test_lookup_city_adm_passed(tmp_path):
+    cache = CityCache(tmp_path / "cities")
     with patch("qweather.api.httpx.get", return_value=_mock_response({"code": "200", "location": []})) as mock_get:
-        api.lookup_city("朝阳", adm="北京")
+        api.lookup_city("朝阳", adm="北京", cache=cache)
     assert mock_get.call_args.kwargs["params"]["adm"] == "北京"
 
 
-def test_lookup_city_business_error(tmp_path, monkeypatch):
-    from qweather import cache as cachemod
-    monkeypatch.setattr(api, "_city_cache", cachemod.CityCache(tmp_path / "cities"))
+def test_lookup_city_business_error(tmp_path):
+    cache = CityCache(tmp_path / "cities")
     with patch("qweather.api.httpx.get", return_value=_mock_response({"code": "404"})):
-        result = api.lookup_city("不存在")
+        result = api.lookup_city("不存在", cache=cache)
     assert "error" in result
     assert result["location"] == []
 
 
-def test_lookup_city_network_error(tmp_path, monkeypatch):
+def test_lookup_city_network_error(tmp_path):
     import httpx
-    from qweather import cache as cachemod
-    monkeypatch.setattr(api, "_city_cache", cachemod.CityCache(tmp_path / "cities"))
+    cache = CityCache(tmp_path / "cities")
     with patch("qweather.api.httpx.get", side_effect=httpx.ConnectError("fail")):
-        result = api.lookup_city("北京")
+        result = api.lookup_city("北京", cache=cache)
     assert "网络请求失败" in result["error"]
     assert result["location"] == []
 ```
@@ -586,20 +613,23 @@ def _base_url() -> str:
     return f"https://{host}"
 
 
-def lookup_city(location: str, adm: str = "") -> dict:
+def lookup_city(location: str, adm: str = "", *, cache: CityCache | None = None) -> dict:
     """
     城市搜索(仅中国,range=cn)。先查缓存,未命中请求 API。
 
     Args:
         location: 城市名称/经纬度/LocationID/Adcode
         adm: 上级行政区划(用于排除重名),可选
+        cache: 城市缓存实例(测试注入用),默认用模块级单例
 
     Returns:
         {"location": [...], "from_cache": bool} 正常;
         {"error": "...", "location": []} 出错
     """
+    cache = cache if cache is not None else _city_cache
+
     # 1. 查缓存
-    cached = _city_cache.get(location, adm)
+    cached = cache.get(location, adm)
     if cached is not None:
         return {"location": cached, "from_cache": True}
 
@@ -614,6 +644,7 @@ def lookup_city(location: str, adm: str = "") -> dict:
             headers=_headers(),
             timeout=10,
         )
+        resp.raise_for_status()
         data = resp.json()
     except (httpx.HTTPError, ValueError) as e:
         return {"error": f"网络请求失败:{e}", "location": []}
@@ -622,7 +653,7 @@ def lookup_city(location: str, adm: str = "") -> dict:
         return {"error": f"和风接口错误: code={data.get('code')}", "location": []}
 
     # 3. 写缓存
-    _city_cache.save(location, adm, data)
+    cache.save(location, adm, data)
     return {"location": data.get("location", []), "from_cache": False}
 ```
 
@@ -650,48 +681,45 @@ git commit -m "feat(qweather): lookup_city 城市搜索(httpx + 城市缓存)"
 
 追加到 `tests/test_api.py`:
 ```python
-def test_get_daily_weather_requests_and_caches(tmp_path, monkeypatch):
-    from qweather import cache as cachemod
-    monkeypatch.setattr(api, "_weather_cache", cachemod.WeatherCache(tmp_path / "weather"))
-
-    daily = [
-        {"fxDate": "2026-06-17", "tempMax": "30", "textDay": "晴"},
-        {"fxDate": "2026-06-18", "tempMax": "28", "textDay": "多云"},
-        {"fxDate": "2026-06-19", "tempMax": "27", "textDay": "阴"},
-    ]
-    with patch("qweather.api.httpx.get", return_value=_mock_response({"code": "200", "daily": daily})) as mock_get:
-        result = api.get_daily_weather("101010100", "3d")
-
-    assert result["from_cache"] is False
-    assert [d["fxDate"] for d in result["daily"]] == ["2026-06-17", "2026-06-18", "2026-06-19"]
-    # URL 路径含 days
-    assert "/v7/weather/3d" in mock_get.call_args.args[0]
-    # 已按 fxDate 拆分写入缓存
-    assert api._weather_cache.get("101010100", "2026-06-17")["textDay"] == "晴"
-
-
-def test_get_daily_weather_cache_hit(tmp_path, monkeypatch):
-    from qweather import cache as cachemod
-    monkeypatch.setattr(api, "_weather_cache", cachemod.WeatherCache(tmp_path / "weather"))
-    # 预先写入今天起 3 天
+def test_get_daily_weather_requests_and_caches(tmp_path):
     import datetime as dt
+    cache = WeatherCache(tmp_path / "weather")
     today = dt.date.today()
     dates = [(today + dt.timedelta(days=i)).isoformat() for i in range(3)]
-    api._weather_cache.save_daily("101010100", [{"fxDate": d, "tempMax": "20"} for d in dates])
+    daily = [
+        {"fxDate": dates[i], "tempMax": str(30 - i), "textDay": "晴"}
+        for i in range(3)
+    ]
+    with patch("qweather.api.httpx.get", return_value=_mock_response({"code": "200", "daily": daily})) as mock_get:
+        result = api.get_daily_weather("101010100", "3d", cache=cache)
+
+    assert result["from_cache"] is False
+    assert [d["fxDate"] for d in result["daily"]] == dates
+    # URL 路径含 days
+    assert "/v7/weather/3d" in mock_get.call_args.args[0]
+    # 已按 fxDate 拆分写入注入的缓存
+    assert cache.get("101010100", dates[0])["textDay"] == "晴"
+
+
+def test_get_daily_weather_cache_hit(tmp_path):
+    import datetime as dt
+    cache = WeatherCache(tmp_path / "weather")
+    today = dt.date.today()
+    dates = [(today + dt.timedelta(days=i)).isoformat() for i in range(3)]
+    cache.save_daily("101010100", [{"fxDate": d, "tempMax": "20"} for d in dates])
 
     with patch("qweather.api.httpx.get") as mock_get:
-        result = api.get_daily_weather("101010100", "3d")
+        result = api.get_daily_weather("101010100", "3d", cache=cache)
 
     assert result["from_cache"] is True
     assert mock_get.call_count == 0  # 未请求 API
     assert len(result["daily"]) == 3
 
 
-def test_get_daily_weather_business_error(tmp_path, monkeypatch):
-    from qweather import cache as cachemod
-    monkeypatch.setattr(api, "_weather_cache", cachemod.WeatherCache(tmp_path / "weather"))
+def test_get_daily_weather_business_error(tmp_path):
+    cache = WeatherCache(tmp_path / "weather")
     with patch("qweather.api.httpx.get", return_value=_mock_response({"code": "402"})):
-        result = api.get_daily_weather("101010100", "3d")
+        result = api.get_daily_weather("101010100", "3d", cache=cache)
     assert "和风接口错误" in result["error"]
     assert result["daily"] == []
 ```
@@ -705,13 +733,14 @@ Expected: FAIL(`AttributeError: get_daily_weather`)
 
 追加到 `qweather/api.py` 末尾:
 ```python
-def get_daily_weather(location_id: str, days: str = "3d") -> dict:
+def get_daily_weather(location_id: str, days: str = "3d", *, cache: WeatherCache | None = None) -> dict:
     """
     每日天气预报。先查缓存(按日期),未命中请求 API 并按 fxDate 拆分存储。
 
     Args:
         location_id: 和风 LocationID
         days: 预报天数 3d/7d/10d/15d/30d
+        cache: 天气缓存实例(测试注入用),默认用模块级单例
 
     Returns:
         {"daily": [...], "from_cache": bool} 正常;
@@ -719,12 +748,14 @@ def get_daily_weather(location_id: str, days: str = "3d") -> dict:
     """
     from datetime import date, timedelta
 
+    cache = cache if cache is not None else _weather_cache
+
     n_days = int(days.rstrip("d"))
     today = date.today()
     want_dates = [(today + timedelta(days=i)).isoformat() for i in range(n_days)]
 
     # 1. 查缓存(全部日期命中才算)
-    cached = _weather_cache.get_range(location_id, want_dates)
+    cached = cache.get_range(location_id, want_dates)
     if cached is not None:
         return {"daily": cached, "from_cache": True}
 
@@ -736,6 +767,7 @@ def get_daily_weather(location_id: str, days: str = "3d") -> dict:
             headers=_headers(),
             timeout=10,
         )
+        resp.raise_for_status()
         data = resp.json()
     except (httpx.HTTPError, ValueError) as e:
         return {"error": f"网络请求失败:{e}", "daily": []}
@@ -745,7 +777,7 @@ def get_daily_weather(location_id: str, days: str = "3d") -> dict:
 
     daily = data.get("daily", [])
     # 3. 按 fxDate 拆分写缓存(整批覆盖,容忍少量重复)
-    _weather_cache.save_daily(location_id, daily)
+    cache.save_daily(location_id, daily)
 
     # 4. 按请求的日期切片返回
     by_date = {d.get("fxDate"): d for d in daily}
@@ -1041,7 +1073,10 @@ def run_chat() -> None:
             # 处理工具调用
             messages.append(msg)
             for tc in msg.tool_calls:
-                args = json.loads(tc.function.arguments)
+                try:
+                    args = json.loads(tc.function.arguments or "{}")
+                except json.JSONDecodeError:
+                    args = {}
                 print(f"  [工具] {tc.function.name}({args})")
                 result = run_tool(tc.function.name, args)
                 messages.append(
@@ -1105,11 +1140,12 @@ if __name__ == "__main__":
 Run: `uv run pytest -v`
 Expected: 全部 passed(config 3 + cache 12 + api 8 + agent 5 = 28 passed)
 
-- [ ] **Step 3: 配置校验手动验证**
+- [ ] **Step 3: 启动与 TOOLS schema 冒烟验证**
 
 确认 `.env` 中 `QWEATHER_KEY` 为和风控制台生成的 JWT token(非占位符),`QWEATHER_HOST`、`DEEPSEEK_API_KEY` 已填。
 Run: `uv run 01_tool_calling_real.py`
 Expected: 打印"天气助手已启动",进入 `你: ` 提示符。
+接着输入 `北京今天天气`,确认 DeepSeek 接受 TOOLS schema(含 `days` 的 enum 字段)并触发工具调用、无 400/schema 报错,出现 `[工具] get_city(...)` 日志。
 
 - [ ] **Step 4: 端到端多轮验证(手动)**
 
