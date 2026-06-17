@@ -91,3 +91,55 @@ class CityCache:
             "location": response.get("location", []),
             "cached_at": date.today().isoformat(),
         })
+
+
+class WeatherCache:
+    """天气缓存:按 location_id + fxDate 存储,当天有效(跨天自然失效)。"""
+
+    def __init__(self, weather_dir: Path = _WEATHER_DIR) -> None:
+        self.dir = weather_dir
+
+    def _path(self, location_id: str, fx_date: str) -> Path:
+        return self.dir / location_id / f"{fx_date}.json"
+
+    def get(self, location_id: str, fx_date: str) -> dict | None:
+        """
+        读取某地某日的天气缓存。
+
+        Returns:
+            当日 daily 数据;未命中返回 None
+        """
+        return _read_json(self._path(location_id, fx_date))
+
+    def save_daily(self, location_id: str, daily_list: list[dict]) -> None:
+        """
+        将 daily 数组按每个 fxDate 拆分存储(3d/7d 请求可共享同一天缓存)。
+
+        Args:
+            location_id: 和风 LocationID
+            daily_list: API 返回的 daily 数组
+        """
+        for item in daily_list:
+            fx_date = item.get("fxDate")
+            if not fx_date:
+                continue
+            _write_json(self._path(location_id, fx_date), item)
+
+    def get_range(self, location_id: str, dates: list[str]) -> list[dict] | None:
+        """
+        获取一组日期的缓存,全部命中返回列表,任一缺失返回 None。
+
+        Args:
+            location_id: 和风 LocationID
+            dates: 需要的日期列表(yyyy-mm-dd)
+
+        Returns:
+            全命中返回按 dates 顺序的 daily 列表;任一缺失返回 None
+        """
+        result = []
+        for d in dates:
+            item = self.get(location_id, d)
+            if item is None:
+                return None
+            result.append(item)
+        return result
