@@ -23,6 +23,12 @@
 ├── .env                 # 本地环境变量（已忽略，需自行创建）
 ├── .gitignore
 └── .python-version      # Python 版本声明
+qweather/                # 和风天气包（Agent + 缓存 + API 封装）
+├── config.py            # 配置读取与启动校验
+├── cache.py             # 城市缓存 + 天气缓存（JSON 文件）
+├── api.py               # 和风 HTTP 接口封装（自动走缓存）
+└── agent.py             # OpenAI tool calling Agent 主循环
+scripts/gen_qweather_jwt.py # 和风 JWT token 生成脚本
 ```
 
 ## 快速开始
@@ -95,12 +101,14 @@ uv sync
 ### 5. 运行
 
 ```bash
-# 运行工具调用示例（天气查询 + 穿衣建议）
-uv run 01_tool_calling.py
-
 # 运行入口占位文件
 uv run main.py
 ```
+
+### 运行天气助手
+
+1. 生成和风 JWT token：`uv run scripts/gen_qweather_jwt.py`（需先在 `.env` 配置 `QWEATHER_PROJECT_ID` / `QWEATHER_CREDENTIAL_ID` / `QWEATHER_PRIVATE_KEY_FILE`，见 `.env.example`），把生成的 token 填入 `.env` 的 `QWEATHER_KEY`
+2. 启动助手：`uv run 01_tool_calling_real.py`（持续聊天，输入 `q` 或 `退出` 结束）
 
 ## uv 常用命令
 
