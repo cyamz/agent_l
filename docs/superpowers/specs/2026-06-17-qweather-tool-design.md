@@ -68,6 +68,15 @@ if __name__ == "__main__":
     run_chat()
 ```
 
+## 认证方式
+
+和风天气采用新版 **JWT 鉴权**:`Authorization: Bearer {token}`(非旧版 `key` 查询参数)。
+
+- `.env` 中 `QWEATHER_KEY` 存放**在和风控制台生成的 JWT token**(控制台 → 凭证 → 生成 Token)
+- `QWEATHER_HOST` 为控制台分配的 API Host(如 `xxx.qweatherapi.com`)
+- `api.py` 用 `httpx` 请求时,请求头统一加 `Authorization: Bearer {QWEATHER_KEY}`
+- **实现前确认**:`QWEATHER_KEY` 必须是控制台生成的 JWT,而非旧版 API Key 字符串。若账号仅支持旧版 `key` 参数鉴权,则改为 query 参数 `key=` 并去掉 Bearer(实现时需验证账号实际支持的鉴权方式)
+
 ## 缓存设计
 
 目录结构(项目级缓存根,按包/服务分层):
@@ -87,9 +96,10 @@ if __name__ == "__main__":
 ### 当日天气缓存(WeatherCache)
 - **key**:`{location_id}/{日期}`,按天一个文件
 - **value**:`daily[]` 中对应 `fxDate` 的那条 + 时间戳
-- **过期**:**当天有效**。查询时 `weather/{location_id}/{today}.json` 存在即命中;跨天自然失效
+- **过期**:**当天有效**。`today` 以**本地系统日期**(中国时区)生成文件名,并与返回的 `fxDate` 字符串比对;跨天自然失效。当前 `range=cn` 仅中国城市,本地时区与城市时区一致,无跨时区问题
 - **写入**:`get_daily_weather` 请求 API 后,把返回 `daily[]` **按每个 `fxDate` 拆分**存储(这样 `3d`/`7d` 请求能共享同一天缓存)
 - **命中逻辑**:查询时先检查所需日期是否都在缓存,命中组装返回,缺失则请求 API 刷新
+- **刷新策略**:刷新时**整批覆盖**该 location_id 的缓存(容忍少量重复请求),符合简易工具定位
 
 ### 格式与并发
 - 纯 JSON 文件,`json.dump(ensure_ascii=False, indent=2)`
@@ -100,7 +110,7 @@ if __name__ == "__main__":
 ## 工具定义(两个,都带缓存,AI 不感知缓存)
 
 ### 工具 1 `get_city`
-- 参数:`query`(用户原话/地名)、`adm`(可选,补充的省/上级行政区)
+- 参数:`query`(用户原话/地名,**映射到接口 `location` 参数**)、`adm`(可选,补充的省/上级行政区,与接口同名)
 - 内部:`lookup_city(query, adm)`(range 固定 `cn`)走城市缓存
 - 返回给 AI:结构化候选列表 `[{name, id, adm1, adm2, lat, lon, rank}, ...]`;无结果返回空列表
 
