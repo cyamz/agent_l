@@ -12,3 +12,9 @@ wheels/
 
 # Claude Code 本地配置
 .claude/
+
+# 项目缓存
+.cache/
+
+# 和风天气私钥
+*.pem
