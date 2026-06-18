@@ -22,8 +22,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# 默认 token 有效期:30 天
-DEFAULT_TTL = 86400 * 30
+# 默认 token 有效期:24 小时(和风 JWT 最长允许 86400 秒)
+DEFAULT_TTL = 86400
 
 
 def generate_token(project_id: str, credential_id: str, private_key_pem: str,
@@ -35,16 +35,17 @@ def generate_token(project_id: str, credential_id: str, private_key_pem: str,
         project_id: 项目 ID,对应 JWT payload 的 sub
         credential_id: 凭证 ID,对应 JWT header 的 kid
         private_key_pem: Ed25519 私钥(PEM 格式字符串)
-        ttl_seconds: token 有效期(秒),默认 30 天
+        ttl_seconds: token 有效期(秒),和风最长允许 86400(24 小时),默认 24 小时
 
     Returns:
         签发的 JWT 字符串
     """
+    # 和风要求:iat 设为当前时间 -30 秒(防时间误差),exp 不得超过 iat+86400
     now = int(time.time())
     payload = {
         "sub": project_id,
-        "iat": now,
-        "exp": now + ttl_seconds,
+        "iat": now - 30,
+        "exp": now - 30 + ttl_seconds,
     }
     headers = {"kid": credential_id}
     return jwt.encode(payload, private_key_pem, algorithm="EdDSA", headers=headers)
@@ -77,7 +78,7 @@ def main():
         private_key_pem = f.read()
 
     token = generate_token(project_id, credential_id, private_key_pem)
-    print("[生成成功] 和风天气 JWT(有效期 30 天):\n")
+    print("[生成成功] 和风天气 JWT(有效期 24 小时):\n")
     print(token)
     print("\n将上面这段 token 完整填入 .env 的 QWEATHER_KEY 即可。")
 
