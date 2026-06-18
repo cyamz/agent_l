@@ -52,9 +52,6 @@ tests/
 
 
 def _reload_config(monkeypatch, env):
-
-
-def _reload_config(monkeypatch, env):
     """用指定 env 重新加载 config(不读真实 .env)。"""
     import qweather.config as config
     for k in ["DEEPSEEK_API_KEY", "QWEATHER_HOST", "QWEATHER_KEY"]:

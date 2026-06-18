@@ -9,9 +9,6 @@ client = OpenAI(
     base_url="https://api.deepseek.com"
 )
 
-QWEATHER_KEY = os.getenv("QWEATHER_KEY")
-
-
 # ---- 定义多个工具 ----
 tools = [
     {
